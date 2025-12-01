@@ -39,13 +39,16 @@ def parse_product_response(item_data, prepared_dict):
         if block.get("type") == "select":
             value = ", ".join([str(v["name"]) for v in block["values"]])
             metadata[block["title"]] = value
+        elif block.get("type") == "flag":
+            metadata[block["title"]] = block.get("placeholder", "")
             continue
-        if block.get("min") == block.get("max"):
+        elif block.get("type") == "range":
+            if block.get("min") == block.get("max"):
+                unit = block.get("unit", "")
+                metadata[block["title"]] = f"{block["max"]}{unit}"
+                continue
             unit = block.get("unit", "")
-            metadata[block["title"]] = f"{block["max"]}{unit}"
-            continue
-        unit = block.get("unit", "")
-        metadata[block["title"]] = f"{block["min"]}-{block["max"]}{unit}"
+            metadata[block["title"]] = f"{block["min"]}-{block["max"]}{unit}"
 
     for block in results.get("text_blocks", []):
         if block["title"] == "Описание":
@@ -64,7 +67,6 @@ def parse_product_response(item_data, prepared_dict):
 class TestTaskSpider(scrapy.Spider):
     name = "test_task"
     api_url = "https://alkoteka.com/web-api/v1/product/"
-    categories = ["vino", "slaboalkogolnye-napitki-2", "krepkiy-alkogol"]
     custom_settings = {
         "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.3",
@@ -78,6 +80,15 @@ class TestTaskSpider(scrapy.Spider):
         super(TestTaskSpider, self).__init__(*args, **kwargs)
         self.city_uuid = kwargs.get("city_uuid")
         self.use_proxy = kwargs.get("use_proxy")
+        self.categories = kwargs.get("categories").split(", ")
+        self.categories = [
+            "https://alkoteka.com/catalog/vino",
+            "https://alkoteka.com/catalog/slaboalkogolnye-napitki-2",
+            "https://alkoteka.com/catalog/krepkiy-alkogol",
+        ]
+        for i in range(len(self.categories)):
+            self.categories[i] = self.categories[i].split("/")[-1]
+
         if self.use_proxy.lower().strip() == "true":
             self.use_proxy = True
         if self.city_uuid is None:
@@ -97,11 +108,11 @@ class TestTaskSpider(scrapy.Spider):
                 method="GET",
                 formdata=parameters,
                 headers={"X-Requested-With": "XMLHttpRequest"},
-                callback=self.parse,
-                meta={"category": category},
+                callback=self.parse_first_page,
+                meta={"category": category, "parameters": parameters},
             )
 
-    def parse(self, response, **kwargs):
+    def parse_first_page(self, response):
         data = json.loads(response.text)
         total_pages = data.get("meta", {}).get("total", 1)
 
@@ -109,11 +120,26 @@ class TestTaskSpider(scrapy.Spider):
         # задания, товаров должно быть от 100 шт. на категорию
         total_wares = total_pages * 20
         if total_wares > 100:
-            total_pages = 5
+            total_pages = 7
 
-        self.logger.info(
-            f"{total_pages} total pages in category {response.meta['category']}"
-        )
+        category = response.meta["category"]
+        base_parameters = response.meta["parameters"]
+
+        for page in range(1, total_pages + 1):
+            parameters = base_parameters.copy()
+            parameters["page"] = str(page)
+
+            yield scrapy.FormRequest(
+                url=self.api_url,
+                method="GET",
+                formdata=parameters,
+                headers={"X-Requested-With": "XMLHttpRequest"},
+                callback=self.parse,
+                meta={"category": category},
+            )
+
+    def parse(self, response, **kwargs):
+        data = json.loads(response.text)
 
         for item in data["results"]:
             price = item["price"]
